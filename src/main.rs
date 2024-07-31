@@ -5,8 +5,9 @@ use std::sync::{Arc, RwLock};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::task;
+use sprs::{CsMat, CsMatBase};
 
-async fn process_chunk(chunk: &[u8], matrix: Arc<RwLock<HashMap<(usize, usize), f64>>>) {
+async fn process_chunk(chunk: &[u8], rows: &mut Vec<usize>, cols: &mut Vec<usize>, values: &mut Vec<f64>) {
     let mut lines = chunk.split(|&b| b == b'\n');
     // Skip any partial line at the beginning of the chunk
     lines.next();
@@ -18,8 +19,9 @@ async fn process_chunk(chunk: &[u8], matrix: Arc<RwLock<HashMap<(usize, usize), 
             let col = std::str::from_utf8(entry[1]).unwrap().parse::<usize>().unwrap() - 1; // 0-based index
             let value = std::str::from_utf8(entry[2]).unwrap().parse::<f64>().unwrap();
 
-            let mut matrix = matrix.write().unwrap();
-            matrix.insert((row, col), value);
+            rows.push(row);
+            cols.push(col);
+            values.push(value);
         }
     }
 }
@@ -75,7 +77,7 @@ async fn main() {
     let n: usize = std::str::from_utf8(dims[1]).unwrap().parse().unwrap();
     let nz: usize = std::str::from_utf8(dims[2]).unwrap().parse().unwrap();
 
-    let matrix = Arc::new(RwLock::new(HashMap::new()));
+    let matrix = Arc::new(RwLock::new((Vec::new(), Vec::new(), Vec::new())));
 
     let num_threads = num_cpus::get();
     let chunk_size = body.len() / num_threads;
@@ -88,18 +90,72 @@ async fn main() {
         let matrix = Arc::clone(&matrix);
 
         tasks.push(task::spawn(async move {
-            process_chunk(&chunk, matrix).await;
+            let mut rows = Vec::new();
+            let mut cols = Vec::new();
+            let mut values = Vec::new();
+            process_chunk(&chunk, &mut rows, &mut cols, &mut values).await;
+
+            let mut matrix = matrix.write().unwrap();
+            matrix.0.extend(rows);
+            matrix.1.extend(cols);
+            matrix.2.extend(values);
         }));
     }
 
     futures::future::join_all(tasks).await;
 
+    let (rows, cols, values) = {
+        let matrix = matrix.read().unwrap();
+        (matrix.0.clone(), matrix.1.clone(), matrix.2.clone())
+    };
+
+    // Combine rows, columns, and values into entries
+    let mut entries: Vec<(usize, usize, f64)> = rows.into_iter()
+        .zip(cols.into_iter())
+        .zip(values.into_iter())
+        .map(|((row, col), value)| (row, col, value))
+        .collect();
+
+    // Sort entries
+    entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    // Unzip entries manually
+    let (sorted_rows, sorted_cols, sorted_values): (Vec<_>, Vec<_>, Vec<_>) = entries.into_iter()
+        .map(|(row, col, value)| (row, col, value))
+        .fold((Vec::new(), Vec::new(), Vec::new()), |(mut rows, mut cols, mut values), (row, col, value)| {
+            rows.push(row);
+            cols.push(col);
+            values.push(value);
+            (rows, cols, values)
+        });
+
+    // Create indptr
+    let mut indptr = vec![0; m + 1];
+    let mut current_row = 0;
+    let mut count = 0;
+    for row in sorted_rows {
+        while current_row < row {
+            indptr[current_row + 1] = count;
+            current_row += 1;
+        }
+        count += 1;
+    }
+    indptr[current_row + 1] = count;
+
+    // Convert to CsMat
+    let cs_matrix = CsMat::new(
+        (m, n),
+        indptr,
+        sorted_cols,
+        sorted_values
+    );
+
     let stdout = io::stdout();
     let mut handle = stdout.lock();
 
     writeln!(handle, "{}", std::str::from_utf8(header).unwrap().trim()).unwrap();
-    writeln!(handle, "{} {} {}", m, n, matrix.read().unwrap().len()).unwrap();
-    // for ((row, col), value) in matrix.read().unwrap().iter() {
+    writeln!(handle, "{} {} {}", m, n, cs_matrix.nnz()).unwrap();
+    // for ((row, col), value) in cs_matrix.iter() {
     //     writeln!(handle, "{} {} {:.19}", row + 1, col + 1, value).unwrap();
     // }
 }
