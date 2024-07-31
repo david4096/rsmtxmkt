@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+// https://math.nist.gov/MatrixMarket/mmio-c.html
 use std::env;
 use std::io::{self, Write};
 use std::sync::{Arc, RwLock};
@@ -38,34 +38,21 @@ fn contains_sequence(haystack: &[u8], needle: &[u8]) -> bool {
     needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|window| window == needle)
 }
 
-#[tokio::main]
-async fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} [matrix-market-filename]", args[0]);
-        std::process::exit(1);
-    }
-    let filename = &args[1];
+async fn load_matrix_market(filename: &str) -> Result<CsMat<f64>, std::io::Error> {
+    let file_size = tokio::fs::metadata(filename).await?.len() as usize;
 
-    let file_size = tokio::fs::metadata(filename).await.unwrap().len() as usize;
-
-    let buffer = read_file_chunk(filename, 0, file_size).await.unwrap_or_else(|_| {
-        eprintln!("Could not read file: {}", filename);
-        std::process::exit(1);
-    });
+    let buffer = read_file_chunk(filename, 0, file_size).await?;
 
     let header_end = buffer.iter().position(|&b| b == b'\n').unwrap_or(buffer.len());
     let header = &buffer[..header_end];
     let body = &buffer[header_end + 1..];
 
     if !contains_sequence(header, b"%%MatrixMarket") {
-        eprintln!("Could not process Matrix Market banner.");
-        std::process::exit(1);
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid Matrix Market banner"));
     }
 
     if !contains_sequence(header, b"matrix") || !contains_sequence(header, b"coordinate") || !contains_sequence(header, b"real") {
-        eprintln!("Unsupported Matrix Market type: [{}]", std::str::from_utf8(header).unwrap().trim());
-        std::process::exit(1);
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Unsupported Matrix Market type"));
     }
 
     let dims_end = body.iter().position(|&b| b == b'\n').unwrap_or(body.len());
@@ -86,7 +73,7 @@ async fn main() {
     for i in 0..num_threads {
         let start = i * chunk_size;
         let end = if i == num_threads - 1 { body.len() } else { start + chunk_size };
-        let chunk = body[start..end].to_vec(); // Clone chunk data
+        let chunk = body[start..end].to_vec();
         let matrix = Arc::clone(&matrix);
 
         tasks.push(task::spawn(async move {
@@ -109,17 +96,14 @@ async fn main() {
         (matrix.0.clone(), matrix.1.clone(), matrix.2.clone())
     };
 
-    // Combine rows, columns, and values into entries
     let mut entries: Vec<(usize, usize, f64)> = rows.into_iter()
         .zip(cols.into_iter())
         .zip(values.into_iter())
         .map(|((row, col), value)| (row, col, value))
         .collect();
 
-    // Sort entries
     entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
-    // Unzip entries manually
     let (sorted_rows, sorted_cols, sorted_values): (Vec<_>, Vec<_>, Vec<_>) = entries.into_iter()
         .map(|(row, col, value)| (row, col, value))
         .fold((Vec::new(), Vec::new(), Vec::new()), |(mut rows, mut cols, mut values), (row, col, value)| {
@@ -129,7 +113,6 @@ async fn main() {
             (rows, cols, values)
         });
 
-    // Create indptr
     let mut indptr = vec![0; m + 1];
     let mut current_row = 0;
     let mut count = 0;
@@ -142,20 +125,37 @@ async fn main() {
     }
     indptr[current_row + 1] = count;
 
-    // Convert to CsMat
-    let cs_matrix = CsMat::new(
+    Ok(CsMat::new(
         (m, n),
         indptr,
         sorted_cols,
         sorted_values
-    );
-
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
-
-    writeln!(handle, "{}", std::str::from_utf8(header).unwrap().trim()).unwrap();
-    writeln!(handle, "{} {} {}", m, n, cs_matrix.nnz()).unwrap();
-    // for ((row, col), value) in cs_matrix.iter() {
-    //     writeln!(handle, "{} {} {:.19}", row + 1, col + 1, value).unwrap();
-    // }
+    ))
 }
+
+
+#[tokio::main]
+async fn main() {
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 {
+        eprintln!("Usage: {} [matrix-market-filename]", args[0]);
+        std::process::exit(1);
+    }
+    let filename = &args[1];
+
+    match load_matrix_market(filename).await {
+        Ok(cs_matrix) => {
+            let stdout = io::stdout();
+            let mut handle = stdout.lock();
+            writeln!(handle, "{} {} {}", cs_matrix.rows(), cs_matrix.cols(), cs_matrix.nnz()).unwrap();
+            // for (value, (row, col)) in cs_matrix.iter() {
+            //     writeln!(handle, "{} {} {:.19}", row + 1, col + 1, value).unwrap();
+            // }
+        }
+        Err(e) => {
+            eprintln!("Failed to load matrix: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
