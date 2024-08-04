@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=0.12"]
+build-backend = "maturin"
+
+[project]
+name = "rsmtxmkt"
+version = "0.1.0"
+description = "A Rust library with Python bindings for processing Matrix Market files"
+license = "MIT"
+keywords = ["rust", "python", "bindings", "matrix market"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.scripts]
+# Optional: If you want to provide a script entry point in Python
+# example = "rsmtxmkt.some_module:main"
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "rsmtxmkt"
+
+[tool.pyo3-pack]
+# Specify the Python versions you want to support
+python = ["3.7", "3.8", "3.9", "3.10", "3.11"]

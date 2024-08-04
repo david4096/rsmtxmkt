@@ -6,6 +6,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::task;
 use sprs::{CsMat};
 
+mod python_bindings; // Include the new Python bindings module
+
+pub use python_bindings::*; // Re-export the Python bindings functions
+
 /// Processes a chunk of the Matrix Market file to extract row, column, and value entries.
 async fn process_chunk(chunk: &[u8], rows: &mut Vec<usize>, cols: &mut Vec<usize>, values: &mut Vec<f64>) {
     let mut lines = chunk.split(|&b| b == b'\n');
